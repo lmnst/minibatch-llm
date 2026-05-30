@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 
 # Must run before importing server, which reads config at import time.
@@ -53,9 +54,22 @@ def test_rejects_nonpositive_max_new_tokens():
 
 def test_no_ml_imports_on_server_path():
     # Invariant #1 guard: importing the server stack must not pull torch or
-    # transformers. Locks the swappable-runner architecture against regression.
-    import scheduler  # noqa: F401
-    import server  # noqa: F401
-
-    assert "torch" not in sys.modules
-    assert "transformers" not in sys.modules
+    # transformers. Runs in a fresh interpreter so the check does not depend on
+    # what the current pytest process has already imported; a model-marked test
+    # in the same run loads torch, which would poison an in-process assertion.
+    # Locks the swappable-runner architecture against regression.
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    probe = (
+        "import sys, scheduler, server; "
+        "assert 'torch' not in sys.modules, 'server path imported torch'; "
+        "assert 'transformers' not in sys.modules, "
+        "'server path imported transformers'"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=repo_root,
+        env={**os.environ, "PYTHONPATH": repo_root, "MODEL_ID": "fake"},
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
