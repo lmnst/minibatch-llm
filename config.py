@@ -9,6 +9,8 @@ class Config:
     max_batch_size: int
     max_wait_ms: float
     model_id: str
+    max_queue_depth: int
+    max_new_tokens_limit: int
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -16,4 +18,6 @@ class Config:
             max_batch_size=int(os.getenv("MAX_BATCH_SIZE", "8")),
             max_wait_ms=float(os.getenv("MAX_WAIT_MS", "10")),
             model_id=os.getenv("MODEL_ID", "distilgpt2"),
+            max_queue_depth=int(os.getenv("MAX_QUEUE_DEPTH", "1024")),
+            max_new_tokens_limit=int(os.getenv("MAX_NEW_TOKENS_LIMIT", "512")),
         )

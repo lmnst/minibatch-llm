@@ -5,9 +5,9 @@ import time
 
 import pytest
 
-from model_runner import FakeRunner
+from model_runner import FakeRunner, ModelRunner
 from schemas import GenerationRequest
-from scheduler import Scheduler
+from scheduler import QueueFull, Scheduler
 
 
 def _req(i: int) -> GenerationRequest:
@@ -140,3 +140,71 @@ def test_rejects_invalid_config():
         Scheduler(runner, max_batch_size=0, max_wait_ms=10)
     with pytest.raises(ValueError):
         Scheduler(runner, max_batch_size=4, max_wait_ms=-1)
+    with pytest.raises(ValueError):
+        Scheduler(runner, max_batch_size=4, max_wait_ms=10, max_queue_depth=2)
+
+
+def test_runner_exception_is_isolated():
+    # A runner that raises must not kill the loop. Its batch futures get the
+    # exception, and a later batch is still served.
+    class BoomRunner(ModelRunner):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def run_batch(self, reqs):
+            self.calls += 1
+            raise RuntimeError("boom")
+
+    async def body():
+        runner = BoomRunner()
+        sched = Scheduler(runner, max_batch_size=2, max_wait_ms=20)
+        await sched.start()
+        try:
+            f1, f2 = sched.submit(_req(1)), sched.submit(_req(2))
+            with pytest.raises(RuntimeError):
+                await f1
+            with pytest.raises(RuntimeError):
+                await f2
+            f3, f4 = sched.submit(_req(3)), sched.submit(_req(4))
+            with pytest.raises(RuntimeError):
+                await asyncio.wait_for(asyncio.gather(f3, f4), timeout=5)
+            assert runner.calls == 2
+        finally:
+            await sched.stop()
+
+    asyncio.run(body())
+
+
+def test_runner_output_count_mismatch_is_isolated():
+    # Runner returns fewer outputs than requests: callers must fail, not hang.
+    class ShortRunner(ModelRunner):
+        def run_batch(self, reqs):
+            return []
+
+    async def body():
+        runner = ShortRunner()
+        sched = Scheduler(runner, max_batch_size=2, max_wait_ms=20)
+        await sched.start()
+        try:
+            f1, f2 = sched.submit(_req(1)), sched.submit(_req(2))
+            with pytest.raises(RuntimeError):
+                await asyncio.wait_for(asyncio.gather(f1, f2), timeout=5)
+        finally:
+            await sched.stop()
+
+    asyncio.run(body())
+
+
+def test_queue_full_backpressure():
+    # submit beyond max_queue_depth raises QueueFull instead of growing without
+    # bound. The loop is never started, so nothing drains the queue.
+    async def body():
+        runner = FakeRunner()
+        sched = Scheduler(runner, max_batch_size=2, max_wait_ms=20, max_queue_depth=3)
+        sched.submit(_req(0))
+        sched.submit(_req(1))
+        sched.submit(_req(2))
+        with pytest.raises(QueueFull):
+            sched.submit(_req(3))
+
+    asyncio.run(body())
