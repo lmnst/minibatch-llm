@@ -12,12 +12,13 @@ Requires Python 3.9+.
 
 | File | Role |
 | --- | --- |
-| `server.py` | FastAPI app. Submits a request, awaits the result, returns text plus metrics. |
+| `server.py` | FastAPI app. Validates the request, submits it, awaits the result, returns text plus metrics. |
 | `scheduler.py` | Async size-or-timeout batcher. Closes a batch and dispatches it to the runner off the event loop. |
 | `model_runner.py` | `ModelRunner` interface, `FakeRunner` (tests), `HFModelRunner` (distilgpt2), and a `build_runner` factory. |
 | `schemas.py` | Plain dataclasses for requests, outputs, metrics. |
 | `config.py` | Reads config from environment. |
 | `tests/test_scheduler.py` | Scheduler unit tests against `FakeRunner`, no model loaded. |
+| `tests/test_server.py` | HTTP-layer tests via `MODEL_ID=fake`, also no model loaded. |
 | `scripts/smoke.py` | End-to-end concurrency check against the real model. |
 
 ## Run
@@ -29,10 +30,27 @@ uvicorn server:app --host 0.0.0.0 --port 8000
 
 First start downloads distilgpt2 (~350 MB). Health probe: `GET /health`.
 
+Example request (PowerShell):
+
+```
+$body = @{ request_id = "a"; prompt = "The capital of France is"; max_new_tokens = 16 } | ConvertTo-Json
+Invoke-RestMethod -Method Post -Uri http://localhost:8000/generate -ContentType application/json -Body $body
+```
+
 Example request (curl):
 
 ```
 curl -X POST http://localhost:8000/generate -H "Content-Type: application/json" -d '{"request_id":"a","prompt":"The capital of France is","max_new_tokens":16}'
+```
+
+Response:
+
+```
+{
+  "request_id": "a",
+  "text": " the city of Paris...",
+  "metrics": {"queue_wait_ms": 3.1, "generate_ms": 412.0, "e2e_ms": 415.4}
+}
 ```
 
 ## Config (environment variables)
@@ -41,7 +59,9 @@ curl -X POST http://localhost:8000/generate -H "Content-Type: application/json" 
 | --- | --- | --- |
 | `MAX_BATCH_SIZE` | `8` | Close a batch once this many requests are queued. |
 | `MAX_WAIT_MS` | `10` | Close a batch once the oldest request has waited this long. |
-| `MODEL_ID` | `distilgpt2` | HuggingFace model id. The value `fake` selects a no-model runner. |
+| `MODEL_ID` | `distilgpt2` | HuggingFace model id. The value `fake` selects a no-model runner for tests. |
+| `MAX_QUEUE_DEPTH` | `1024` | Pending-queue cap. Submitting past it returns 503. |
+| `MAX_NEW_TOKENS_LIMIT` | `512` | Per-request `max_new_tokens` ceiling. Past it returns 422. |
 
 ## Metrics
 
@@ -51,11 +71,23 @@ Each response carries three timings, in milliseconds:
 - `generate_ms`: the `run_batch` call itself (pure inference, shared by a batch).
 - `e2e_ms`: handler receive until response sent.
 
+The scheduler also logs each batch close at INFO with its size, reason
+(`full` or `timeout`), and `generate_ms`.
+
 ## Tests
 
 ```
 python -m pytest
 ```
+
+`tests/test_scheduler.py` drives the scheduler with `FakeRunner`: full-batch
+close, timeout close (and that it actually waits), FCFS batch composition,
+fill-before-timeout, no loss or duplication, runner-exception isolation,
+output-count mismatch isolation, metric sanity, config validation, and queue
+backpressure. `tests/test_server.py` exercises the HTTP layer with
+`MODEL_ID=fake`: health, metrics shape, the 400 and 422 contracts, and a guard
+that importing the server stack pulls neither torch nor transformers. Neither
+file loads a model.
 
 For real-model concurrency:
 
@@ -63,10 +95,28 @@ For real-model concurrency:
 python scripts/smoke.py
 ```
 
-## P0 notes
+It starts the server, fires six different prompts at once, and checks that
+every response keeps its own request_id and a full set of metrics.
 
-- Greedy only. The server rejects any `temperature` other than 0.0 (a static
-  batch shares one decode setting; per-request sampling lands in P1).
+## P0 notes and known limits
+
+- Greedy only. A single HF `generate()` call takes one batch-level
+  temperature, so per-request sampling is not expressible under static
+  batching. P0 makes that explicit: the server rejects any `temperature` other
+  than 0.0 with a 400 rather than silently ignoring it. Per-request sampling
+  lands in P1 with the hand-written loop.
+- Inputs are validated up front. `max_new_tokens` must be in `(0, MAX_NEW_TOKENS_LIMIT]`
+  (else 422), `MAX_BATCH_SIZE` must be > 0 and `MAX_WAIT_MS` >= 0 (else the
+  server refuses to start), and the queue is bounded (else 503).
 - A batch runs to the largest `max_new_tokens` in it. Shorter requests keep
   generating until the whole batch is done, then get truncated. That wasted
-  work is what P2 continuous batching removes.
+  work is the cost of static batching, and is exactly what P2 continuous
+  batching removes by evicting a sequence as soon as it hits EOS.
+
+## What P1 changes
+
+Only the body of `HFModelRunner.run_batch` changes: `generate()` is replaced by
+a hand-written greedy decode loop driving `past_key_values`. The gate is
+token-for-token agreement with `model.generate(do_sample=False)`. Because the
+scheduler depends only on the `ModelRunner` interface, `server.py` and
+`scheduler.py` stay untouched.
