@@ -1,9 +1,9 @@
-# MiniBatch-LLM (Phase 0)
+# MiniBatch-LLM (Phase 1)
 
 A minimal LLM inference server with static (request-level) batching, running
 on CPU with distilgpt2. This is the scaffold that later phases swap real
 batching logic into. The scheduler talks to the model through one interface
-(`ModelRunner`), so P1 can replace `generate()` with a hand-written
+(`ModelRunner`), which let P1 replace `generate()` with a hand-written
 past_key_values decode loop without touching `server.py` or `scheduler.py`.
 
 Requires Python 3.9+.
@@ -76,8 +76,11 @@ The scheduler also logs each batch close at INFO with its size, reason
 
 ## Tests
 
+The default suite is model-free: it loads neither torch nor transformers, so it
+runs anywhere.
+
 ```
-python -m pytest
+python -m pytest -m "not model"
 ```
 
 `tests/test_scheduler.py` drives the scheduler with `FakeRunner`: full-batch
@@ -88,6 +91,19 @@ backpressure. `tests/test_server.py` exercises the HTTP layer with
 `MODEL_ID=fake`: health, metrics shape, the 400 and 422 contracts, and a guard
 that importing the server stack pulls neither torch nor transformers. Neither
 file loads a model.
+
+The parity gate loads distilgpt2 and is marked `model`:
+
+```
+python -m pytest -m model
+```
+
+`tests/test_decode_parity.py` checks the hand-written greedy decode loop token
+for token against `model.generate(do_sample=False)`: one batch with a uniform
+`max_new_tokens` over varied-length prompts, and one batch that pins the stop
+token to a value the model actually emits so per-row EOS-to-pad is exercised.
+Because this test is marked `model`, bare `python -m pytest` now loads a model
+and is no longer model-free; use `-m "not model"` for the model-free suite.
 
 For real-model concurrency:
 
@@ -103,8 +119,8 @@ every response keeps its own request_id and a full set of metrics.
 - Greedy only. A single HF `generate()` call takes one batch-level
   temperature, so per-request sampling is not expressible under static
   batching. P0 makes that explicit: the server rejects any `temperature` other
-  than 0.0 with a 400 rather than silently ignoring it. Per-request sampling
-  lands in P1 with the hand-written loop.
+  than 0.0 with a 400 rather than silently ignoring it. P1's hand-written loop
+  makes per-request sampling expressible but leaves it unwired and greedy.
 - Inputs are validated up front. `max_new_tokens` must be in `(0, MAX_NEW_TOKENS_LIMIT]`
   (else 422), `MAX_BATCH_SIZE` must be > 0 and `MAX_WAIT_MS` >= 0 (else the
   server refuses to start), and the queue is bounded (else 503).
@@ -113,10 +129,19 @@ every response keeps its own request_id and a full set of metrics.
   work is the cost of static batching, and is exactly what P2 continuous
   batching removes by evicting a sequence as soon as it hits EOS.
 
-## What P1 changes
+## What P1 changed
 
-Only the body of `HFModelRunner.run_batch` changes: `generate()` is replaced by
-a hand-written greedy decode loop driving `past_key_values`. The gate is
-token-for-token agreement with `model.generate(do_sample=False)`. Because the
-scheduler depends only on the `ModelRunner` interface, `server.py` and
-`scheduler.py` stay untouched.
+`HFModelRunner.run_batch` no longer calls `generate()`. It runs a hand-written
+greedy decode loop that drives `past_key_values` directly: one prefill over the
+left-padded batch, then an `argmax` per step to the batch's largest
+`max_new_tokens`, advancing per-row `position_ids` and the shared
+`cache_position` and growing the attention mask each step. A row that emits EOS
+has its remaining tokens forced to pad, mirroring `generate`. The loop agrees
+with `model.generate(do_sample=False)` token for token, which is the parity gate
+above.
+
+The loop stays greedy. It makes per-request sampling expressible, but P1 does
+not wire it, so the server still rejects `temperature != 0`. Only
+`model_runner.py` and the new parity test changed; because the scheduler depends
+only on the `ModelRunner` interface, `server.py` and `scheduler.py` stayed
+untouched.
