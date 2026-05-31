@@ -49,8 +49,7 @@ async def generate(body: GenerateBody):
     if body.temperature != 0.0:
         raise HTTPException(
             status_code=400,
-            detail="P0 supports greedy decoding only; temperature must be 0.0. "
-            "Per-request sampling lands in P1.",
+            detail="This server supports greedy decoding only; temperature must be 0.0.",
         )
     if body.max_new_tokens > config.max_new_tokens_limit:
         raise HTTPException(
