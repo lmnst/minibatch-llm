@@ -8,6 +8,21 @@ past_key_values decode loop without touching `server.py` or `scheduler.py`.
 
 Requires Python 3.9+.
 
+## Status
+
+Work in progress, milestone 2 of 4. This is not a finished product yet: the
+headline feature (continuous batching) and the benchmark story are still ahead,
+so do not read the current state as a complete static-only server.
+
+- P0 (done): static request-level batching scaffold on CPU, the swappable
+  runner seam, scheduler and HTTP unit tests.
+- P1 (done, this milestone): hand-written greedy KV-cache decode loop replacing
+  `generate()`, proven token for token against `generate(do_sample=False)`.
+- P2 (next): continuous (iteration-level) batching, evicting a sequence at EOS
+  and refilling the batch from the queue per step.
+- P3 (later): GPU benchmark with throughput and p50/p95/p99/tokens-per-sec
+  curves plus a roofline writeup that explains them.
+
 ## Layout
 
 | File | Role |
@@ -141,7 +156,6 @@ with `model.generate(do_sample=False)` token for token, which is the parity gate
 above.
 
 The loop stays greedy. It makes per-request sampling expressible, but P1 does
-not wire it, so the server still rejects `temperature != 0`. Only
-`model_runner.py` and the new parity test changed; because the scheduler depends
-only on the `ModelRunner` interface, `server.py` and `scheduler.py` stayed
+not wire it, so the server still rejects `temperature != 0`. The decode loop
+change preserved the `ModelRunner` interface, so `scheduler.py` stayed
 untouched.
