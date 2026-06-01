@@ -8,7 +8,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from config import Config
-from model_runner import build_runner
+from engine import build_engine
 from schemas import GenerationRequest, Metrics
 from scheduler import QueueFull, Scheduler
 
@@ -18,7 +18,7 @@ scheduler: Scheduler | None = None
 
 class GenerateBody(BaseModel):
     request_id: str
-    prompt: str
+    prompt: str = Field(min_length=1)
     max_new_tokens: int = Field(default=64, gt=0)
     temperature: float = 0.0
 
@@ -27,9 +27,9 @@ class GenerateBody(BaseModel):
 async def lifespan(app: FastAPI):
     global scheduler
     logging.basicConfig(level=logging.INFO)
-    runner = build_runner(config.model_id)
+    engine = build_engine(config.model_id)
     scheduler = Scheduler(
-        runner, config.max_batch_size, config.max_wait_ms, config.max_queue_depth
+        engine, config.max_batch_size, config.max_queue_depth
     )
     await scheduler.start()
     yield
@@ -56,7 +56,8 @@ async def generate(body: GenerateBody):
             status_code=422,
             detail=f"max_new_tokens exceeds the limit of {config.max_new_tokens_limit}",
         )
-    assert scheduler is not None  # set during lifespan startup
+    if scheduler is None:
+        raise HTTPException(status_code=503, detail="server not ready")
     t0 = time.perf_counter()
     req = GenerationRequest(
         request_id=body.request_id,
@@ -68,6 +69,10 @@ async def generate(body: GenerateBody):
         result = await scheduler.submit(req)
     except QueueFull:
         raise HTTPException(status_code=503, detail="server overloaded; queue full")
+    except ValueError as exc:
+        # The engine rejects a prompt whose token length plus max_new_tokens
+        # would overflow the model context; that is a bad request, not a 500.
+        raise HTTPException(status_code=422, detail=str(exc))
     e2e_ms = (time.perf_counter() - t0) * 1000.0
     return {
         "request_id": result.output.request_id,

@@ -6,32 +6,17 @@ from schemas import GenerationOutput, GenerationRequest
 
 
 class ModelRunner(ABC):
-    """Single seam the scheduler talks to. Swappable so P1 can replace the
-    body of run_batch with a hand-written past_key_values decode loop without
-    touching server.py or scheduler.py."""
+    """P1 static (request-level) batching baseline.
+
+    Once the scheduler's seam, now superseded by engine.InferenceEngine for
+    P2 continuous batching. Kept as the static comparison point for the parity
+    guard (tests/test_decode_parity.py) and the benchmark: one run_batch runs the
+    whole batch to its largest max_new_tokens."""
 
     @abstractmethod
     def run_batch(self, reqs: list[GenerationRequest]) -> list[GenerationOutput]:
         """Run one batch. Outputs are returned in the same order as reqs."""
         ...
-
-
-class FakeRunner(ModelRunner):
-    """Deterministic runner for scheduler tests. Loads no model, no torch."""
-
-    def __init__(self) -> None:
-        self.call_count = 0
-        self.batch_sizes: list[int] = []
-        self.batches: list[list[str]] = []
-
-    def run_batch(self, reqs: list[GenerationRequest]) -> list[GenerationOutput]:
-        self.call_count += 1
-        self.batch_sizes.append(len(reqs))
-        self.batches.append([r.request_id for r in reqs])
-        return [
-            GenerationOutput(request_id=r.request_id, text=f"{r.prompt}|{r.request_id}")
-            for r in reqs
-        ]
 
 
 class HFModelRunner(ModelRunner):
@@ -142,11 +127,3 @@ class HFModelRunner(ModelRunner):
             text = self._tokenizer.decode(row, skip_special_tokens=True)
             results.append(GenerationOutput(request_id=r.request_id, text=text))
         return results
-
-
-def build_runner(model_id: str) -> ModelRunner:
-    """Factory used by the server. A model_id of 'fake' yields FakeRunner, so
-    the HTTP layer can be exercised without loading a model."""
-    if model_id == "fake":
-        return FakeRunner()
-    return HFModelRunner(model_id)
