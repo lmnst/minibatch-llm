@@ -52,6 +52,15 @@ def test_rejects_nonpositive_max_new_tokens():
         assert r.status_code == 422
 
 
+def test_rejects_empty_prompt():
+    with TestClient(app) as client:
+        r = client.post(
+            "/generate",
+            json={"request_id": "a", "prompt": "", "max_new_tokens": 8},
+        )
+        assert r.status_code == 422
+
+
 def test_no_ml_imports_on_server_path():
     # Invariant #1 guard: importing the server stack must not pull torch or
     # transformers. Runs in a fresh interpreter so the check does not depend on
