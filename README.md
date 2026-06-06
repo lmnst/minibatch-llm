@@ -248,3 +248,7 @@ device portability (tensors still assume CPU) and `pad != eos` support (this cod
 relies on distilgpt2's `pad == eos == 50256`), non-greedy sampling, SSE
 streaming, auth, and multi-tenancy. The decode loop stays greedy; the server
 still rejects `temperature != 0` with a 400.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
